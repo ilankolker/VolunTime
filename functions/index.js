@@ -1,49 +1,115 @@
-
 const functions = require('firebase-functions');
 const admin = require('firebase-admin');
 admin.initializeApp();
 
-// Send chat-gpt our query
+const { Configuration, OpenAIApi } = require("openai");
 
-exports.generateVolunteers = functions.https.onCall(async (data, context) => {
+// Set up OpenAI client
+const configuration = new Configuration({
+    organization: "org-W1xrGR4WAmmdeqk5vOBvlntj",
+    apiKey: "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",
+});
 
-    age = data.age
-    location = data.location
-    hobbies = data.hobbies
-    //how far will you go to make a diffrenece?
-    availabilty = data.availabilty
+const openai = new OpenAIApi(configuration);
+
+
+// Export functions
+const prompt = "Give me a 1-5 list of specific places to volunteer, in %location%, for %age% years old with %availability% free hours a week and likes: %hobbies%. Give a description of 20 words max for each option in the format 'name: description'. Don't give an intro. After the 5th option, add an explanation of 20 words max of why you chose the first option in this format: 'Explanation: <explanation>'."
+
+exports.generateVolunteers = functions.region('europe-west1').https.onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new functions.https.HttpsError("unauthenticated", "You must be authenticated");
+    }
+
+    const age = data.age;
+    const location = data.location;    
+    const availability = data.available;  
+    const hobbies = data.hobbies.join(", ");
     
+    let messages = [{ 
+        role: "user", 
+        content: prompt.replace("%location%", location).replace("%age%", age).replace("%availability%", availability).replace("%hobbies%", hobbies)
+    }]
 
-    res = chatgpt.send(propt.replace("age", age, "location", location, "hobbies",
-                                     hobbies, "availabilty", availabilty))
+    const completion = await openai.createChatCompletion({
+        model: "gpt-3.5-turbo",
+        messages: messages
+    });
+
+    response = completion.data.choices[0].message.content;
     
-    // add all volunteers to db if not exists
+    volunteerPositions = response.split("\n");
+    volunteerPositions = volunteerPositions.map(position => {
+        position = position.substring(3, position.length - 1);
+        return position.split(": ");
+    });
 
+    return JSON.stringify({ success: true, volunteerPositions: volunteerPositions });
+});
 
-    return res
-})
+exports.getVolunteerPosition = functions.region('europe-west1').https.onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new functions.https.HttpsError("unauthenticated", "You must be authenticated");
+    }
 
-// We get a key of the volunteering and user data and add the user to the volunnteering table
+    if(context.auth.uid != data.uid) {
+        throw new functions.https.HttpsError("permission-denied", "You do not have permission to access this resource");
+    }
 
-// auth trigger (new join us)
+    const doc = await admin.firestore().collection('users').doc(data.uid).get();
 
-exports.addUserToVolunteering = functions.onCall(async (data, context) => {
-    admin.firestore().collection('volunteering').doc(data.volunteering.website, data.volunteering.location).set({
+    if(!doc || !doc.exists || doc.data().volunteerPosition == null) {
+        return JSON.stringify({ volunteerPosition: null });
+    }
+    
+    return JSON.stringify({ success: true, volunteerPosition: doc.data().volunteerPosition });
+});
 
-        volunteers: volunteers.push(data.user.id)
-    })
+exports.setVolunteerPosition = functions.region('europe-west1').https.onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new functions.https.HttpsError("unauthenticated", "You must be authenticated");
+    }
 
-})
+    if(context.auth.uid != data.uid) {
+        throw new functions.https.HttpsError("permission-denied", "You do not have permission to access this resource");
+    }
 
-// add a new volunteering if it doesnt exist
+    let user = await admin.firestore().collection('users').doc(data.uid).get();
 
-exports.addVolunteering = functions.onCall(async (data, context) =>{
-    admin.firestore().collection('volunterring').doc(data.volunteering.website, data.volunteering.location).set({
-        website: data.volunteering.website,
-        location: data.volunteering.location,
-        name: data.volunteering.name,
-        description: data.volunteering.description,
-        volunteers: []
-    })
+    // If the user already has a volunteer position, remove them from it
+    if(user && user.exists && user.data().volunteerPosition != null) {
+        await admin.firestore().collection('volunteerPositions').doc(user.data().volunteerPosition).update({
+            users: admin.firestore.FieldValue.arrayRemove(data.uid)
+        });
 
-})
+        await admin.firestore().collection('users').doc(data.uid).set({
+            volunteerPosition: null
+        });
+    }
+
+    // If no new volunteer position is being set, return
+    if(data.volunteerPosition == null) {
+        return JSON.stringify({ success: true, volunteerPosition: null });
+    }
+
+    // Add a new record of the volunteer position if it does not exist/get the existing one
+    let volunteerPosition = await admin.firestore().collection('volunteerPositions').doc(data.volunteerPosition).get();
+
+    // Update the user's volunteer position
+    if(!volunteerPosition || !volunteerPosition.exists) {
+        await admin.firestore().collection('volunteerPositions').doc(data.volunteerPosition).set({
+            users: admin.firestore.FieldValue.arrayUnion(data.uid)
+        });
+    } else {
+        await admin.firestore().collection('volunteerPositions').doc(data.volunteerPosition).update({
+            users: admin.firestore.FieldValue.arrayUnion(data.uid)
+        });
+    }
+
+    await admin.firestore().collection('users').doc(data.uid).set({
+        volunteerPosition: data.volunteerPosition
+    });
+
+    return JSON.stringify({ success: true, volunteerPosition: data.volunteerPosition });
+});
+

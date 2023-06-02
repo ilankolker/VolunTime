@@ -23,8 +23,12 @@ exports.generateVolunteers = functions.region('europe-west1').https.onCall(async
 
     const age = data.age;
     const location = data.location;    
-    const availability = data.available;  
-    const hobbies = data.hobbies.join(", ");
+    const availability = data.availability;  
+    const hobbies = data.hobbies;
+
+    if(!age || !location || !availability || !hobbies) {
+        throw new functions.https.HttpsError("invalid-argument", "You must provide age, location, availability and hobbies");
+    }
     
     let messages = [{ 
         role: "user", 
@@ -44,7 +48,30 @@ exports.generateVolunteers = functions.region('europe-west1').https.onCall(async
         return position.split(": ");
     });
 
-    return JSON.stringify({ success: true, volunteerPositions: volunteerPositions });
+    result = {
+        1: {
+            name: volunteerPositions[0][0],
+            desc: volunteerPositions[0][1],
+        },
+        2: {
+            name: volunteerPositions[1][0],
+            desc: volunteerPositions[1][1],
+        },
+        3: {
+            name: volunteerPositions[2][0],
+            desc: volunteerPositions[2][1],
+        },
+        4: {
+            name: volunteerPositions[3][0],
+            desc: volunteerPositions[3][1],
+        },
+        5: {
+            name: volunteerPositions[4][0],
+            desc: volunteerPositions[4][1],
+        }
+    }
+
+    return JSON.stringify({ success: true, volunteerPositions: result });
 });
 
 exports.getVolunteerPosition = functions.region('europe-west1').https.onCall(async (data, context) => {
@@ -113,3 +140,43 @@ exports.setVolunteerPosition = functions.region('europe-west1').https.onCall(asy
     return JSON.stringify({ success: true, volunteerPosition: data.volunteerPosition });
 });
 
+const systemPrompt = "give me a short description of someone who would reach out to %volunteerPosition% in the following format: \"You are a <description>\"";
+exports.simulate = functions.region('europe-west1').https.onCall(async (data, context) => {
+    if (!context.auth) {
+        throw new functions.https.HttpsError("unauthenticated", "You must be authenticated");
+    }
+
+    if(!data.volunteerPosition) {
+        throw new functions.https.HttpsError("invalid-argument", "You must provide a volunteer position");
+    }
+    
+    let messages = JSON.parse(data.messages);
+
+    // If we are starting a new conversation with the ai, send the system prompt
+    // Otherwise, add the user's message to the messages array
+    if(messages.length == 1) {
+        let systemMessages = [{
+            role: "user",
+            content: systemPrompt.replace("%volunteerPosition%", data.volunteerPosition)
+        }]
+
+        const completion = await openai.createChatCompletion({
+            model: "gpt-3.5-turbo",
+            messages: systemMessages
+        });
+    
+        response = completion.data.choices[0].message.content;
+
+        messages = [{
+            role: "system",
+            content: response
+        }, ...messages]
+    }
+
+    const completion = await openai.createChatCompletion({
+        model: "gpt-3.5-turbo",
+        messages: messages
+    });
+
+    return JSON.stringify({ success: true, messages: [...messages, completion.data.choices[0].message], response: completion.data.choices[0].message });
+});
